@@ -1,0 +1,15 @@
+[Unit]
+Description=TradeCopilot XAUUSD Scanner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/tradecopilot-v2
+ExecStart=/home/ubuntu/tradecopilot-v2/venv/bin/python run_scanner.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

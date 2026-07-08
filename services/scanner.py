@@ -181,6 +181,42 @@ def _scan_extra_strategies(executor, router, candles_cache, last_seen_extra):
             _log(f"[{name}] Duplicate setup -- already have a matching OPEN/PENDING trade, skipping alert.")
 
 
+def run_cycle(executor, router, timeframes, last_seen, last_seen_extra):
+    """
+    Runs one full scan cycle -- the body of the continuous loop in
+    run() below, pulled out so a single-pass/cron-style caller (e.g.
+    run_scanner_once.py, for hosting on a schedule that can't keep a
+    process resident) can run exactly one cycle and persist
+    `last_seen`/`last_seen_extra` itself between invocations.
+
+    Mutates `last_seen` and `last_seen_extra` in place (same dedup
+    role they play inside run()'s loop).
+    """
+
+    # refresh_open_trades() returns any trade touched this cycle --
+    # either newly CLOSED (SL/TP2 resolved) or still OPEN with
+    # tp1_hit just flipped True (partial close at TP1, stop moved to
+    # breakeven). Same list, distinguish by status.
+    touched_trades = executor.refresh_open_trades()
+    for trade in touched_trades:
+        if trade["status"] == "CLOSED":
+            _log(f"Trade #{trade['id']} closed -- {trade['result']}")
+            router.fire_trade_closed(trade)
+        elif trade.get("tp1_hit"):
+            _log(f"Trade #{trade['id']} hit TP1 -- stop moved to breakeven")
+            router.fire_trade_tp1_hit(trade)
+
+    macro = _get_macro()
+
+    candles_cache = {}
+    for label, tf_interval in timeframes.items():
+        candles = get_xauusd_candles(interval=tf_interval, n_bars=100)
+        candles_cache[label] = candles
+        _scan_smc_timeframe(label, candles, executor, router, macro, last_seen)
+
+    _scan_extra_strategies(executor, router, candles_cache, last_seen_extra)
+
+
 def run(poll_interval=None, router=None, executor=None, timeframes=None):
     """
     Continuously polls the market on a timer and runs 2 independent
@@ -217,21 +253,7 @@ def run(poll_interval=None, router=None, executor=None, timeframes=None):
 
     while True:
         try:
-            closed_trades = executor.refresh_open_trades()
-            for trade in closed_trades:
-                _log(f"Trade #{trade['id']} closed -- {trade['result']}")
-                router.fire_trade_closed(trade)
-
-            macro = _get_macro()
-
-            candles_cache = {}
-            for label, tf_interval in timeframes.items():
-                candles = get_xauusd_candles(interval=tf_interval, n_bars=100)
-                candles_cache[label] = candles
-                _scan_smc_timeframe(label, candles, executor, router, macro, last_seen)
-
-            _scan_extra_strategies(executor, router, candles_cache, last_seen_extra)
-
+            run_cycle(executor, router, timeframes, last_seen, last_seen_extra)
         except Exception as e:
             _log(f"Error in scan loop: {e}")
 
