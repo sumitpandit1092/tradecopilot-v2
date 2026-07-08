@@ -36,9 +36,6 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TV_USERNAME: ${{ secrets.TV_USERNAME }}
           TV_PASSWORD: ${{ secrets.TV_PASSWORD }}
-          SCAN_INTERVAL_SECONDS: ${{ vars.SCAN_INTERVAL_SECONDS }}
-          ENABLE_MACRO_CONTEXT: ${{ vars.ENABLE_MACRO_CONTEXT }}
-          SESSION_FILTER_ENABLED: ${{ vars.SESSION_FILTER_ENABLED }}
         run: python run_scanner_once.py
 
       - name: Persist state
