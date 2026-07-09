@@ -87,6 +87,14 @@ class ExecutionEngine:
             "risk_amount": risk.get("risk_amount"),
             "position_size": risk.get("position_size"),
 
+            # Partial-close tracking: half the position closes at TP1
+            # (banking a partial profit) and the stop moves to breakeven
+            # for the other half, so a trade that later reverses closes
+            # PARTIAL_WIN instead of a full LOSS -- see update_trade().
+            "tp1_hit": False,
+            "tp1_pnl": None,
+            "original_stop_loss": None,
+
             # Lifecycle
             "status": "PENDING" if is_limit else "OPEN",
             "result": None,
@@ -106,15 +114,31 @@ class ExecutionEngine:
     # =====================================================
     def update_trade(self, trade_id, price):
         """
-        Check an OPEN trade against SL/TP2 and close it if either has
-        been hit, booking realized PnL from the actual exit price.
+        Checks an OPEN trade against TP1, SL, and TP2, booking realized
+        PnL from the actual exit price(s).
 
-        `price` accepts either a plain price (legacy -- older
-        callers and the offline tests pass a single float, treated as
-        if open=high=low=close=that price, so no intrabar distinction)
-        or a full candle dict for real intrabar checking.
+        `price` accepts either a plain price (legacy -- older callers
+        and the offline tests pass a single float, treated as if
+        open=high=low=close=that price, so no intrabar distinction) or
+        a full candle dict for real intrabar checking.
 
-        FIXED (two bugs found via backtest calibration, see project
+        Partial-close at TP1: the first time TP1 is hit, half the
+        position closes there (banking `tp1_pnl`) and the stop moves to
+        breakeven (`original_stop_loss` keeps the pre-move value for
+        reference) for the remaining half. This means a trade that
+        later reverses closes PARTIAL_WIN (still net profitable from
+        the TP1 half) instead of a full LOSS -- and if TP2 is reached
+        afterward it's still a full WIN, just computed from two
+        half-position legs instead of one. If TP1 is never hit, nothing
+        changes vs before: a loss uses the full position at the
+        original stop.
+
+        Returns the trade dict on any change (TP1 just hit, or the
+        trade just closed) so callers can tell the two apart via
+        `status` ("OPEN" = TP1-hit update only, "CLOSED" = resolved).
+        Returns None if nothing changed this call.
+
+        FIXED (bugs found via backtest calibration, see project
         history): (1) the previous version only checked the candle's
         *close* against SL/TP2, so a fast intrabar push through the
         stop that recovered by the close was invisible -- a trade could
@@ -127,14 +151,9 @@ class ExecutionEngine:
         (2) PnL used to be a hardcoded +2x/-1x risk_amount regardless
         of the trade's *actual* TP2 distance -- correct for the SMC
         engine's fixed 1:2 target, but silently wrong for any strategy
-        with a different real RR (e.g. EMA Pullback's 1:3, or the
-        liquidity-based/measured-move targets used elsewhere), and
-        wrong for any loss that overshot the stop. PnL is now computed
-        from (exit_price - entry) * position_size, direction-aware.
-
-        Also: direction-aware for bias (a losing SELL rallying through
-        its stop no longer gets numerically misread as a WIN, which was
-        the original V2 fix this docstring used to describe).
+        with a different real RR, and wrong for any loss that
+        overshot the stop. PnL is now computed from
+        (exit_price - entry) * position_size, direction-aware.
         """
 
         for t in self.trades:
@@ -147,8 +166,6 @@ class ExecutionEngine:
                 else:
                     open_ = high = low = price
 
-                sl = t["stop_loss"]
-                tp2 = t["take_profit_2"]
                 bias = t.get("bias")
 
                 if bias not in ("Bullish", "Bearish"):
@@ -156,54 +173,83 @@ class ExecutionEngine:
                     # trade open rather than risk a wrong result.
                     return None
 
+                entry = t.get("entry")
+                position_size = t.get("position_size") or 0
+                tp1 = t.get("take_profit_1")
+                tp2 = t.get("take_profit_2")
+
+                changed = False
+
+                # --- Step 1: TP1 partial close + move stop to breakeven ---
+                if not t.get("tp1_hit") and tp1 is not None and position_size and entry is not None:
+                    hit_tp1 = (bias == "Bullish" and high >= tp1) or (bias == "Bearish" and low <= tp1)
+
+                    if hit_tp1:
+                        half_size = position_size / 2
+                        partial_pnl = (tp1 - entry) * half_size if bias == "Bullish" else (entry - tp1) * half_size
+
+                        t["tp1_hit"] = True
+                        t["tp1_pnl"] = round(partial_pnl, 2)
+                        t["original_stop_loss"] = t["stop_loss"]
+                        t["stop_loss"] = entry  # breakeven for the remaining half
+                        changed = True
+
+                sl = t["stop_loss"]
+
+                # --- Step 2: final exit check (SL/breakeven or TP2) ---
                 result = None
                 exit_price = None
 
                 if bias == "Bullish":
                     if sl is not None and open_ <= sl:
-                        result, exit_price = "LOSS", open_        # gapped through at the open
+                        result, exit_price = ("PARTIAL_WIN" if t["tp1_hit"] else "LOSS"), open_
                     elif sl is not None and low <= sl:
-                        result, exit_price = "LOSS", sl           # stop-order fill assumption
+                        result, exit_price = ("PARTIAL_WIN" if t["tp1_hit"] else "LOSS"), sl
                     elif tp2 is not None and high >= tp2:
                         result, exit_price = "WIN", tp2
 
                 else:  # Bearish
                     if sl is not None and open_ >= sl:
-                        result, exit_price = "LOSS", open_
+                        result, exit_price = ("PARTIAL_WIN" if t["tp1_hit"] else "LOSS"), open_
                     elif sl is not None and high >= sl:
-                        result, exit_price = "LOSS", sl
+                        result, exit_price = ("PARTIAL_WIN" if t["tp1_hit"] else "LOSS"), sl
                     elif tp2 is not None and low <= tp2:
                         result, exit_price = "WIN", tp2
 
                 if result is None:
+                    if changed:
+                        self._save()
+                        return t  # TP1 just hit, trade still open
                     return None
 
-                entry = t.get("entry")
-                position_size = t.get("position_size")
+                remaining_size = (position_size / 2) if t["tp1_hit"] else position_size
 
-                if entry is not None and position_size:
-                    pnl = (exit_price - entry) * position_size if bias == "Bullish" \
-                        else (entry - exit_price) * position_size
+                if entry is not None and remaining_size:
+                    remainder_pnl = (exit_price - entry) * remaining_size if bias == "Bullish" \
+                        else (entry - exit_price) * remaining_size
                 else:
-                    # Fallback for records missing entry/position_size
-                    pnl = t["risk_amount"] * 2 if result == "WIN" else -t["risk_amount"]
+                    remainder_pnl = 0
 
-                # Round-trip spread cost, charged once at close using
-                # the exit candle's session (an approximation -- see
-                # spread_model.py -- but entry and exit usually fall in
-                # the same broad session for these short intraday
-                # trades). Skipped for legacy bare-float callers with
-                # no timestamp to key the session off of.
+                # Round-trip spread cost, charged on the remaining leg
+                # using the exit candle's session (an approximation --
+                # see spread_model.py). Skipped for legacy bare-float
+                # callers with no timestamp to key the session off of.
                 spread_cost = 0
-                if isinstance(price, dict) and "time" in price and position_size:
-                    spread_cost = get_spread(price["time"]) * position_size
-                    pnl -= spread_cost
+                if isinstance(price, dict) and "time" in price and remaining_size:
+                    spread_cost = get_spread(price["time"]) * remaining_size
+                    remainder_pnl -= spread_cost
+
+                total_pnl = (t.get("tp1_pnl") or 0) + remainder_pnl
+
+                if entry is None or not position_size:
+                    # Fallback for records missing entry/position_size
+                    total_pnl = t["risk_amount"] * 2 if result == "WIN" else -t["risk_amount"]
 
                 t["status"] = "CLOSED"
                 t["result"] = result
                 t["exit_price"] = round(exit_price, 2)
                 t["spread_cost"] = round(spread_cost, 2)
-                t["pnl"] = round(pnl, 2)
+                t["pnl"] = round(total_pnl, 2)
 
                 self._save()
                 return t
@@ -343,7 +389,9 @@ class ExecutionEngine:
         pending = sum(1 for t in self.trades if t["status"] == "PENDING")
         cancelled = sum(1 for t in self.trades if t["status"] == "CANCELLED")
         wins = sum(1 for t in self.trades if t["result"] == "WIN")
+        partial_wins = sum(1 for t in self.trades if t["result"] == "PARTIAL_WIN")
         losses = sum(1 for t in self.trades if t["result"] == "LOSS")
+        tp1_hits = sum(1 for t in self.trades if t.get("tp1_hit"))
 
         # "Executed" = actually filled (OPEN or CLOSED) -- PENDING orders
         # that never filled, and ones CANCELLED before filling, never
@@ -352,7 +400,10 @@ class ExecutionEngine:
 
         pnl = sum(t["pnl"] for t in self.trades if t["pnl"] is not None)
 
-        winrate = (wins / executed * 100) if executed > 0 else 0
+        # PARTIAL_WIN counts toward win rate -- it's a net-profitable
+        # outcome (the TP1 half banked a real gain, the remainder just
+        # closed flat at breakeven), just smaller than a full TP2 win.
+        winrate = ((wins + partial_wins) / executed * 100) if executed > 0 else 0
 
         return {
             "total_trades": total,
@@ -360,7 +411,9 @@ class ExecutionEngine:
             "pending": pending,
             "cancelled": cancelled,
             "wins": wins,
+            "partial_wins": partial_wins,
             "losses": losses,
+            "tp1_hits": tp1_hits,
             "winrate": round(winrate, 2),
             "net_pnl": round(pnl, 2)
         }

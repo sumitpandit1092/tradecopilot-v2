@@ -95,9 +95,10 @@ def run_backtest(candles, htf_data, account_balance, risk_percent,
     # resolved-only figure (wins/(wins+losses)) still include trades
     # still OPEN at the end of the dataset (never resolved either way)
     # in the "executed" denominator, so report the strictest version
-    # (resolved only) as the headline number.
-    resolved = summary["wins"] + summary["losses"]
-    resolved_winrate = round(summary["wins"] / resolved * 100, 2) if resolved else 0
+    # (resolved only) as the headline number. PARTIAL_WIN counts as a
+    # win here too -- see ExecutionEngine.summary().
+    resolved = summary["wins"] + summary["partial_wins"] + summary["losses"]
+    resolved_winrate = round((summary["wins"] + summary["partial_wins"]) / resolved * 100, 2) if resolved else 0
 
     return {
         "candles_scanned": scanned,

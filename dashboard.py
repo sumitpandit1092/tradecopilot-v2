@@ -40,10 +40,13 @@ def compute_summary(trades):
     cancelled = sum(1 for t in trades if t["status"] == "CANCELLED")
     open_now = sum(1 for t in trades if t["status"] == "OPEN")
     wins = sum(1 for t in trades if t.get("result") == "WIN")
+    partial_wins = sum(1 for t in trades if t.get("result") == "PARTIAL_WIN")
     losses = sum(1 for t in trades if t.get("result") == "LOSS")
+    tp1_hits = sum(1 for t in trades if t.get("tp1_hit"))
     executed = total - pending - cancelled
     pnl = sum(t["pnl"] for t in trades if t.get("pnl") is not None)
-    winrate = (wins / executed * 100) if executed else 0
+    # PARTIAL_WIN counts toward win rate -- see ExecutionEngine.summary().
+    winrate = ((wins + partial_wins) / executed * 100) if executed else 0
 
     return {
         "total": total,
@@ -51,7 +54,9 @@ def compute_summary(trades):
         "pending": pending,
         "cancelled": cancelled,
         "wins": wins,
+        "partial_wins": partial_wins,
         "losses": losses,
+        "tp1_hits": tp1_hits,
         "winrate": round(winrate, 2),
         "net_pnl": round(pnl, 2),
     }
@@ -73,6 +78,7 @@ def per_strategy_breakdown(trades):
             "Pending": s["pending"],
             "Cancelled": s["cancelled"],
             "Wins": s["wins"],
+            "Partial Wins": s["partial_wins"],
             "Losses": s["losses"],
             "Win Rate %": s["winrate"],
             "Net PnL": s["net_pnl"],
@@ -122,14 +128,17 @@ def render_metrics():
 
     st.subheader("Performance Summary")
 
-    cols = st.columns(7)
+    cols = st.columns(8)
     cols[0].metric("Total Trades", summary["total"])
     cols[1].metric("Open", summary["open"])
     cols[2].metric("Pending", summary["pending"])
     cols[3].metric("Wins", summary["wins"])
-    cols[4].metric("Losses", summary["losses"])
-    cols[5].metric("Win Rate", f"{summary['winrate']}%")
-    cols[6].metric("Net PnL", f"${summary['net_pnl']}")
+    cols[4].metric("Partial Wins", summary["partial_wins"], help="TP1 hit, stop moved to breakeven, remainder closed flat or better")
+    cols[5].metric("Losses", summary["losses"])
+    cols[6].metric("Win Rate", f"{summary['winrate']}%", help="Includes partial wins")
+    cols[7].metric("Net PnL", f"${summary['net_pnl']}")
+
+    st.caption(f"TP1 hit on {summary['tp1_hits']} trades total (including ones still running to TP2)")
 
     st.markdown("**By strategy**")
     breakdown = per_strategy_breakdown(trades)
@@ -173,12 +182,20 @@ def render_trade_table():
         return
 
     df = pd.DataFrame(trades)
+
+    if "tp1_hit" in df.columns:
+        df["tp1_hit"] = df["tp1_hit"].map({True: "✅", False: "—"})
+
     columns = [
         "id", "time", "strategy", "bias", "recommendation", "entry_type",
-        "entry", "stop_loss", "take_profit_2", "status", "result", "pnl",
+        "entry", "stop_loss", "take_profit_1", "tp1_hit", "take_profit_2",
+        "status", "result", "pnl",
     ]
     columns = [c for c in columns if c in df.columns]
-    df = df[columns].sort_values("id", ascending=False)
+    df = df[columns].rename(columns={
+        "take_profit_1": "TP1", "take_profit_2": "TP2", "tp1_hit": "TP1 Hit",
+    })
+    df = df.sort_values("id", ascending=False)
 
     st.dataframe(df, hide_index=True, use_container_width=True)
 

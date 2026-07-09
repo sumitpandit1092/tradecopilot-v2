@@ -72,8 +72,8 @@ def run_strategy_backtest(strategy_fn, m5_candles, m15_candles=None, account_bal
     summary = executor.summary()
     trading_days = max(len(days_seen), 1)
 
-    resolved = summary["wins"] + summary["losses"]
-    resolved_winrate = round(summary["wins"] / resolved * 100, 2) if resolved else 0
+    resolved = summary["wins"] + summary["partial_wins"] + summary["losses"]
+    resolved_winrate = round((summary["wins"] + summary["partial_wins"]) / resolved * 100, 2) if resolved else 0
 
     return {
         "candles_scanned": total,

@@ -117,7 +117,7 @@ def format_trade_cancelled_message(trade, timeframe="M15"):
 
 def format_trade_closed_message(trade):
     result = trade.get("result")
-    emoji = "✅" if result == "WIN" else "❌"
+    emoji = {"WIN": "✅", "PARTIAL_WIN": "🟡"}.get(result, "❌")
 
     lines = [
         f"{emoji} <b>TRADE CLOSED -- {result}</b>",
@@ -126,7 +126,25 @@ def format_trade_closed_message(trade):
         f"Entry: {trade.get('entry')}",
         f"Stop Loss: {trade.get('stop_loss')}",
         f"Take Profit 2: {trade.get('take_profit_2')}",
-        f"PnL: {trade.get('pnl')}",
+    ]
+
+    if trade.get("tp1_hit"):
+        lines.append(f"TP1 was hit (+{trade.get('tp1_pnl')}), remainder closed at breakeven")
+
+    lines.append(f"PnL: {trade.get('pnl')}")
+
+    return "\n".join(lines)
+
+
+def format_trade_tp1_hit_message(trade, timeframe="M15"):
+    lines = [
+        "\U0001F3AF <b>TP1 HIT -- STOP MOVED TO BREAKEVEN</b>",
+        f"XAUUSD — {timeframe} ({trade.get('strategy', 'SMC')})",
+        f"Bias: {trade.get('bias')}",
+        f"Entry: {trade.get('entry')}",
+        f"TP1: {trade.get('take_profit_1')}  (banked: +{trade.get('tp1_pnl')})",
+        f"New stop (breakeven): {trade.get('stop_loss')}",
+        f"Still running to TP2: {trade.get('take_profit_2')}",
     ]
 
     return "\n".join(lines)

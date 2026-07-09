@@ -4,6 +4,7 @@ from services.notifier import (
     format_trade_closed_message,
     format_trade_filled_message,
     format_trade_cancelled_message,
+    format_trade_tp1_hit_message,
 )
 
 
@@ -36,5 +37,10 @@ class SignalRouter:
 
     def fire_trade_cancelled(self, trade, timeframe="M15"):
         message = format_trade_cancelled_message(trade, timeframe=timeframe)
+        for channel in self.channels:
+            channel.send(message)
+
+    def fire_trade_tp1_hit(self, trade, timeframe="M15"):
+        message = format_trade_tp1_hit_message(trade, timeframe=timeframe)
         for channel in self.channels:
             channel.send(message)
