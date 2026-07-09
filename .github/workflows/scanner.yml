@@ -1,8 +1,10 @@
 name: TradeCopilot Scanner
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"
+  # Schedule trigger removed -- the scanner now runs 24/7 on a real EC2
+  # instance (see deploy/), so this would otherwise double-alert and
+  # keep a second, separate trade journal. Left as workflow_dispatch
+  # only so it can still be run manually if the EC2 box is ever down.
   workflow_dispatch: {}
 
 permissions:
