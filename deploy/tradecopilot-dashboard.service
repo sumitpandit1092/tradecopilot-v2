@@ -1,0 +1,15 @@
+[Unit]
+Description=TradeCopilot Streamlit Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/tradecopilot-v2
+ExecStart=/home/ubuntu/tradecopilot-v2/venv/bin/streamlit run dashboard.py --server.address 0.0.0.0 --server.port 8501 --server.headless true
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
