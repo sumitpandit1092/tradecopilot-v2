@@ -18,19 +18,20 @@ from services.router import SignalRouter
 import services.strategy_session_breakout as session_breakout
 
 
-# Scanned every cycle, fastest first so a quick M3/M5 setup isn't
-# sitting behind a slower fetch. Daily/H4/H1 HTF bias is still computed
-# for every one of these via timeframe_engine.py -- only the "entry"
-# timeframe changes. This is the SMC (structure/liquidity/FVG/OB)
-# engine, backtested separately from the strategies below.
+# Daily/H4/H1 HTF bias is still computed via timeframe_engine.py --
+# only the "entry" timeframe changes. This is the SMC (structure/
+# liquidity/FVG/OB) engine, backtested separately from the strategies
+# below.
 #
-# M15 dropped (backtested as the weak spot: -$65.14, 31.3% WR, just
-# under its 33.3% breakeven). M1 also tried and dropped: high signal
-# frequency (24.5/day) but win rate sat right at breakeven and turned
-# net-negative (-$201.05 over 8 days) once spread/slippage were
-# factored in -- worse than M3/M5, which are both showing a real edge.
+# M15 and M30 dropped: despite covering much longer, more mixed-regime
+# backtest windows (82 and 156 days vs M3/M5's TradingView-anonymous-
+# capped 15-20 days) both came back net-negative (M15: -$64.54, 29.73%
+# WR; M30: -$87.23, 28.95% WR). M1 also tried and dropped earlier
+# (net-negative once spread/slippage were factored in). M3 dropped
+# last: net-positive but the weaker of the two survivors (+$25.34,
+# 37.04% WR vs M5's +$147.01, 48.57% WR) on the same backtest run --
+# M5 alone is the one timeframe with a real, consistent edge.
 SCAN_TIMEFRAMES = {
-    "M3": Interval.in_3_minute,
     "M5": Interval.in_5_minute,
 }
 
@@ -128,23 +129,42 @@ def _scan_smc_timeframe(label, candles, executor, router, macro, last_seen):
     )
 
     if trade_ready:
-        trade_record = executor.open_trade(signal=signal, entry=entry, risk=risk)
+        # Position cap: at most 2 live SMC trades per timeframe, one
+        # direction only (no hedging) -- see ExecutionEngine.open_trade.
+        trade_record = executor.open_trade(
+            signal=signal, entry=entry, risk=risk,
+            timeframe=label, max_positions=2, single_side=True,
+        )
 
         if trade_record:
             _log(f"[SMC/{label}] Trade #{trade_record['id']} {trade_record['status']} ({trade_record['entry_type']})")
             router.fire_signal(signal, entry, risk, timeframe=f"SMC/{label}")
         else:
-            _log(f"[SMC/{label}] Duplicate setup -- already have a matching OPEN/PENDING trade, skipping alert.")
+            _log(f"[SMC/{label}] Position cap reached (2/side) or opposite side live -- skipping to avoid overtrading.")
 
 
-def _scan_extra_strategies(executor, router, candles_cache, last_seen_extra):
-    m15 = candles_cache.get("M15")
-    m5 = candles_cache.get("M5")
+def _scan_extra_strategies(executor, router, last_seen_extra):
+    """
+    FIXED: this used to read m15/m5 out of `candles_cache`, which is
+    only populated for whatever's currently in SMC's SCAN_TIMEFRAMES --
+    so when M15 was dropped from SMC's own rotation (M3/M5, now M5
+    only), `candles_cache.get("M15")` silently went permanently None
+    and Session_Breakout (needs_15m=True) has been skipping every
+    cycle ever since, with no error to notice it by. These strategies'
+    data needs have nothing to do with what timeframe SMC happens to be
+    scanning, so this now fetches M5 always, and M15 lazily (only if a
+    registered strategy actually declares needs_15m=True), independent
+    of SCAN_TIMEFRAMES entirely.
+    """
+
+    m5 = get_xauusd_candles(interval=Interval.in_5_minute, n_bars=100)
 
     if not m5:
         return
 
     latest_m5_time = m5[-1]["time"]
+
+    m15 = None  # fetched lazily below, only if something actually needs it
 
     for name, strategy_fn, needs_15m in EXTRA_STRATEGIES:
         if last_seen_extra.get(name) == latest_m5_time:
@@ -153,6 +173,8 @@ def _scan_extra_strategies(executor, router, candles_cache, last_seen_extra):
 
         try:
             if needs_15m:
+                if m15 is None:
+                    m15 = get_xauusd_candles(interval=Interval.in_15_minute, n_bars=100)
                 if not m15:
                     continue
                 result = strategy_fn(m15, m5, account_balance=ACCOUNT_BALANCE, risk_percent=RISK_PERCENT)
@@ -172,7 +194,10 @@ def _scan_extra_strategies(executor, router, candles_cache, last_seen_extra):
             f"(confidence {signal.get('confidence')})"
         )
 
-        trade_record = executor.open_trade(signal=signal, entry=entry, risk=risk)
+        # Tagged "M5" (not `name`) so refresh_open_trades() checks it
+        # against the right resolution -- these strategies enter on M5
+        # candle closes, same as the SMC/M5 path.
+        trade_record = executor.open_trade(signal=signal, entry=entry, risk=risk, timeframe="M5")
 
         if trade_record:
             _log(f"[{name}] Trade #{trade_record['id']} {trade_record['status']} ({trade_record['entry_type']})")
@@ -208,13 +233,11 @@ def run_cycle(executor, router, timeframes, last_seen, last_seen_extra):
 
     macro = _get_macro()
 
-    candles_cache = {}
     for label, tf_interval in timeframes.items():
         candles = get_xauusd_candles(interval=tf_interval, n_bars=100)
-        candles_cache[label] = candles
         _scan_smc_timeframe(label, candles, executor, router, macro, last_seen)
 
-    _scan_extra_strategies(executor, router, candles_cache, last_seen_extra)
+    _scan_extra_strategies(executor, router, last_seen_extra)
 
 
 def run(poll_interval=None, router=None, executor=None, timeframes=None):
@@ -222,14 +245,15 @@ def run(poll_interval=None, router=None, executor=None, timeframes=None):
     Continuously polls the market on a timer and runs 2 independent
     signal sources every cycle:
 
-    - SMC (structure/liquidity/FVG/OB) across M3/M5/M15 -- the
-      original OR-confluence engine, no session filter (both were
-      tried as a stricter "sniper" variant and backtested worse once
-      execution accounting was corrected, so reverted).
+    - SMC (structure/liquidity/FVG/OB) across SCAN_TIMEFRAMES (M5 only
+      -- see that constant's comment for why M1/M3/M15/M30 were tried
+      and dropped), gated on a real 2-of-3 sniper confluence
+      requirement and a fast H1-only HTF alignment check.
     - Session Breakout -- direct market entry at breakout confirmation
       (its original "wait for a retest" design was backtested and
       found to systematically filter out the strongest continuations;
-      fixed to enter immediately instead).
+      fixed to enter immediately instead). Runs on its own M5/M15 fetch,
+      independent of SMC's SCAN_TIMEFRAMES (see _scan_extra_strategies).
 
     Both share one ExecutionEngine (one trade journal -- no duplicate-
     trade blocking; every qualifying signal opens its own trade, since

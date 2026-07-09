@@ -1,4 +1,15 @@
 from services.atr import calculate_atr
+from services.structure_engine import get_swings
+
+
+def _nearest_below(levels, price):
+    below = [lvl for lvl in levels if lvl < price]
+    return max(below) if below else None
+
+
+def _nearest_above(levels, price):
+    above = [lvl for lvl in levels if lvl > price]
+    return min(above) if above else None
 
 
 def build_risk_plan(
@@ -93,14 +104,67 @@ def build_risk_plan(
     # =====================================================
     # STOP LOSS
     # =====================================================
+    # FIXED: entry_engine.py already computes a real structural
+    # invalidation level (the order block's low/high -- actual
+    # support/resistance) whenever one is available, but it was being
+    # thrown away here in favor of a pure entry +/- 1.5*ATR distance
+    # that ignores where real structure actually sits. A stop placed
+    # purely by ATR can land inside normal noise range well short of
+    # the level price would actually need to break to invalidate the
+    # setup, causing stop-outs on moves that never really threatened
+    # the trade idea.
+    #
+    # Fallback chain (each tier only used if the one above isn't
+    # available): Order Block invalidation -> nearest liquidity pool or
+    # swing point beyond entry (both are real support/resistance, just
+    # a coarser read than an order block) -> ATR multiple as the last
+    # resort when the window has no structure at all yet. Liquidity
+    # pools and swing points are merged into one tier and the NEAREST
+    # of either is used -- both are equally valid S/R, and the closer
+    # one gives the tightest stop that's still anchored to something
+    # real, rather than arbitrarily preferring one source.
+    #
+    # A small ATR buffer is placed beyond the liquidity/swing level
+    # (not exactly at it) since price frequently wicks precisely to a
+    # prior swing/pool before reversing -- stopping exactly on the
+    # level would get clipped by the very wick that confirms it.
+
+    invalidation = entry_data.get("invalidation")
+
+    liquidity = signal.get("liquidity") or {}
+    sell_side_levels = [p["level"] for p in liquidity.get("sell_side_liquidity", [])]
+    buy_side_levels = [p["level"] for p in liquidity.get("buy_side_liquidity", [])]
+
+    swing_highs, swing_lows = get_swings(candles)
+
+    structure_buffer = atr * 0.15
+    stop_loss_source = "ATR (no structure available)"
 
     if bias == "Bullish":
 
-        stop_loss = entry - (atr * sl_multiplier)
+        if invalidation is not None and invalidation < entry:
+            stop_loss = invalidation
+            stop_loss_source = "Order Block"
+        else:
+            nearest_structural = _nearest_below(sell_side_levels + swing_lows, entry)
+            if nearest_structural is not None:
+                stop_loss = nearest_structural - structure_buffer
+                stop_loss_source = "Liquidity Pool / Swing Low"
+            else:
+                stop_loss = entry - (atr * sl_multiplier)
 
     elif bias == "Bearish":
 
-        stop_loss = entry + (atr * sl_multiplier)
+        if invalidation is not None and invalidation > entry:
+            stop_loss = invalidation
+            stop_loss_source = "Order Block"
+        else:
+            nearest_structural = _nearest_above(buy_side_levels + swing_highs, entry)
+            if nearest_structural is not None:
+                stop_loss = nearest_structural + structure_buffer
+                stop_loss_source = "Liquidity Pool / Swing High"
+            else:
+                stop_loss = entry + (atr * sl_multiplier)
 
     else:
 
@@ -222,7 +286,7 @@ def build_risk_plan(
         "execution_ready": True,
 
         "reasons": [
-            "ATR based stop loss",
+            f"Stop loss anchored to: {stop_loss_source}",
             "Dynamic position sizing",
             "Institutional risk management"
         ]

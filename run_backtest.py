@@ -9,7 +9,6 @@ from services.backtester import run_backtest
 
 
 ENTRY_TIMEFRAMES = {
-    "M3": Interval.in_3_minute,
     "M5": Interval.in_5_minute,
 }
 

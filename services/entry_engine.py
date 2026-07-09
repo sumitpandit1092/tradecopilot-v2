@@ -59,8 +59,17 @@ def build_entry(signal, candles=None):
                 invalidation = bullish_ob[-1]["low"]
 
             else:
+                # FIXED: this used to hardcode invalidation = price - 10,
+                # an arbitrary $10 buffer that isn't real structure but
+                # was indistinguishable from one downstream -- risk_engine
+                # treated ANY non-None invalidation on the correct side
+                # of entry as "Order Block anchored," so every MARKET
+                # entry silently skipped its own liquidity-pool/swing-
+                # point/ATR fallback chain. Leaving it None here lets
+                # risk_engine actually reach those fallbacks instead of
+                # being masked by a fake structural level.
                 entry_type = "BUY_MARKET"
-                invalidation = price - 10
+                invalidation = None
 
             reasons.append("Bullish bias aligned with Discount zone")
 
@@ -86,8 +95,9 @@ def build_entry(signal, candles=None):
                 invalidation = bearish_ob[-1]["high"]
 
             else:
+                # See the mirrored BUY_MARKET comment above.
                 entry_type = "SELL_MARKET"
-                invalidation = price + 10
+                invalidation = None
 
             reasons.append("Bearish bias aligned with Premium zone")
 

@@ -36,17 +36,67 @@ class ExecutionEngine:
             self.trades = []
 
     # =====================================================
-    # 1. OPEN TRADE (EXECUTION ENTRY)
+    # 1. POSITION-LIMIT GATE (opt-in -- SMC path only)
     # =====================================================
-    def open_trade(self, signal, entry, risk, bar_index=None):
+    def _position_blocked(self, signal, timeframe, max_positions, single_side):
+        """
+        Per-(strategy, timeframe) exposure cap, so the SMC engine
+        doesn't overtrade.
+
+        Counts live exposure (OPEN + resting PENDING limits) scoped to
+        one strategy on one entry timeframe, and blocks a new order
+        when either:
+          - `single_side` is set and any live trade in that scope is on
+            the opposite side -- never hedge a BUY against a SELL; or
+          - that scope already holds `max_positions` live trades.
+
+        Scoped by strategy AND timeframe (not timeframe alone): broadcast
+        strategies (Session Breakout, etc.) are tagged with a `timeframe`
+        too now, purely so refresh_open_trades() checks them against the
+        right-resolution candle -- they must NOT share an exposure count
+        with the SMC engine just because both happen to trade M5.
+
+        Up to `max_positions` SAME-side trades are still allowed (e.g. a
+        market fill plus a resting limit at a better level), which is
+        what makes "2 per timeframe, one direction" work without letting
+        the scanner stack unlimited entries. PENDING counts so unfilled
+        limits can't sneak past the cap.
+        """
+
+        strategy = signal.get("strategy", "SMC")
+
+        active = [
+            t for t in self.trades
+            if t["status"] in ("OPEN", "PENDING")
+            and t.get("timeframe") == timeframe
+            and t.get("strategy", "SMC") == strategy
+        ]
+
+        if single_side and any(t["bias"] != signal["bias"] for t in active):
+            return True
+
+        return len(active) >= max_positions
+
+    # =====================================================
+    # 2. OPEN TRADE (EXECUTION ENTRY)
+    # =====================================================
+    def open_trade(self, signal, entry, risk, bar_index=None,
+                   timeframe=None, max_positions=None, single_side=False):
         """
         Create a new trade if valid.
 
-        No duplicate-trade blocking: this system broadcasts alerts to
-        many subscribers, not a single account managing one position,
-        so a repeat signal in the same direction should still open (and
-        alert) again -- someone who missed the first entry can still
-        catch the next one.
+        By default there's no duplicate-trade blocking: this system
+        broadcasts alerts to many subscribers, not a single account
+        managing one position, so a repeat signal in the same direction
+        should still open (and alert) again -- someone who missed the
+        first entry can still catch the next one.
+
+        The SMC path opts INTO position limits by passing `timeframe`
+        + `max_positions` (+ `single_side`): at most `max_positions`
+        live trades (OPEN or resting PENDING) per timeframe, and never
+        an opposite-direction trade while one side is live (see
+        _position_blocked()). Callers that omit `max_positions` keep the
+        broadcast-everything behaviour.
 
         *_LIMIT entries (a sniper entry waiting for a retracement into
         an order block) open as PENDING, not OPEN -- no capital is at
@@ -58,6 +108,11 @@ class ExecutionEngine:
         a pending order expire after sitting unfilled too long.
         """
 
+        if max_positions is not None and self._position_blocked(
+            signal, timeframe, max_positions, single_side
+        ):
+            return None
+
         entry_type = entry.get("entry_type")
         is_limit = isinstance(entry_type, str) and entry_type.endswith("_LIMIT")
 
@@ -67,6 +122,7 @@ class ExecutionEngine:
 
             # Market Context
             "strategy": signal.get("strategy", "SMC"),
+            "timeframe": timeframe,
             "price": signal["price"],
             "bias": signal["bias"],
             "confidence": signal["confidence"],
@@ -352,6 +408,19 @@ class ExecutionEngine:
         fast intrabar push through the stop is caught the same cycle
         instead of waiting for a close beyond it. Call this once at the
         start of AI.ask() (or on a timer) before opening any new trade.
+
+        FIXED (real bug, found live): this used to fetch ONE candle set
+        at get_xauusd_candles()'s default interval (M15) and check EVERY
+        open trade against it, regardless of which timeframe the trade
+        was actually opened on. An M3 trade's tight SL/TP was being
+        evaluated against a much coarser M15 candle's open/high/low --
+        a range covering 5x the price movement -- which could show a
+        stop "hit" (or a TP2 "hit") that never happened at the M3
+        resolution the trade's levels were calculated on. Now groups
+        open trades by their `timeframe` field and fetches each group's
+        own-resolution candle before checking it. Legacy trades with no
+        `timeframe` recorded (opened before this field existed) fall
+        back to M15, same as before.
         """
 
         open_trades = self.active_trades()
@@ -362,21 +431,28 @@ class ExecutionEngine:
         # Imported lazily so the rest of ExecutionEngine's lifecycle
         # logic can be unit tested without requiring tvDatafeed to be
         # installed (see services/__init__.py for the same reasoning).
-        from services.market_data import get_xauusd_candles
+        from services.market_data import get_xauusd_candles, TIMEFRAME_INTERVALS
+        from tvDatafeed import Interval
 
-        candles = get_xauusd_candles()
-
-        if not candles:
-            return []
-
-        latest_candle = candles[-1]
+        by_timeframe = {}
+        for t in open_trades:
+            by_timeframe.setdefault(t.get("timeframe"), []).append(t)
 
         updated = []
 
-        for t in open_trades:
-            result = self.update_trade(t["id"], latest_candle)
-            if result:
-                updated.append(result)
+        for timeframe, trades in by_timeframe.items():
+            interval = TIMEFRAME_INTERVALS.get(timeframe, Interval.in_15_minute)
+            candles = get_xauusd_candles(interval=interval)
+
+            if not candles:
+                continue
+
+            latest_candle = candles[-1]
+
+            for t in trades:
+                result = self.update_trade(t["id"], latest_candle)
+                if result:
+                    updated.append(result)
 
         return updated
 

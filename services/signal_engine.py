@@ -1,6 +1,6 @@
 from services.market_data import get_latest_price
 from services.timeframe_engine import analyze_timeframes
-from services.bias_engine import build_market_bias
+from services.bias_engine import build_market_bias, build_scalp_htf_bias
 from services.structure_engine import (
     get_swings,
     detect_structure,
@@ -334,7 +334,13 @@ def build_signal(candles, macro=None, entry_label="M15", htf_data=None, as_of=No
 
     htf_bias = market_bias.get("bias")
 
-    htf_aligned = (bias == htf_bias)
+    # Alignment gate uses the FAST H1-only reference, not the full
+    # Daily(4)/H4(3)/H1(2) composite in `htf_bias` above -- see
+    # build_scalp_htf_bias()'s docstring. `htf_bias`/`htf_aligned_slow`
+    # are kept for display/debugging (the report shows both).
+    scalp_htf_bias = build_scalp_htf_bias(timeframe_data)
+    htf_aligned = (bias == scalp_htf_bias)
+    htf_aligned_slow = (bias == htf_bias)
 
     # Informational only (OR) -- still used for the point score above
     # and shown in the report as a looser "some confluence" signal.
@@ -372,13 +378,27 @@ def build_signal(candles, macro=None, entry_label="M15", htf_data=None, as_of=No
     # =====================================================
     # BUY FILTERS
     # =====================================================
+    # htf_aligned is a hard AND-gate again (tried dropping it entirely
+    # -- see build_scalp_htf_bias()'s docstring for why that backfired:
+    # it let through far more failed countertrend bounces than real
+    # reversals). It's now checked against the FAST H1-only reference
+    # instead of the slow Daily/H4/H1 composite, so a genuine intraday
+    # reversal can still pass without waiting for the daily chart to
+    # turn.
+    #
+    # FIXED: this used to gate on `bullish_confluence`/`bearish_confluence`
+    # (a loose bool(fvg or ob) OR), even though the sniper-gate comment
+    # above claims the 2-of-3 (sweep+OB+FVG) version is "what actually
+    # allows a trade" -- it was computed and shown in the report but
+    # never actually wired into the filter. Now gates on the real
+    # 2-of-3 sniper confluence.
 
     if (
         bias == "Bullish"
         and confidence >= 85
         and htf_aligned
         and zone == "Discount"
-        and bullish_confluence
+        and bullish_sniper_confluence
     ):
 
         action = "BUY"
@@ -393,7 +413,7 @@ def build_signal(candles, macro=None, entry_label="M15", htf_data=None, as_of=No
         and confidence >= 85
         and htf_aligned
         and zone == "Premium"
-        and bearish_confluence
+        and bearish_sniper_confluence
     ):
 
         action = "SELL"
@@ -409,23 +429,29 @@ def build_signal(candles, macro=None, entry_label="M15", htf_data=None, as_of=No
             reasons.append("Confidence below execution threshold")
 
         if not htf_aligned:
-            reasons.append("Higher timeframe not aligned")
+            reasons.append(f"H1 timeframe not aligned (H1 bias: {scalp_htf_bias})")
 
         if bias == "Bullish":
 
             if zone != "Discount":
                 reasons.append("Bullish setup outside Discount Zone")
 
-            if not bullish_confluence:
-                reasons.append("Missing unfilled Bullish FVG / unmitigated Order Block")
+            if not bullish_sniper_confluence:
+                reasons.append(
+                    f"Missing sniper confluence ({bullish_factor_count}/3: "
+                    "sweep + Order Block + FVG, need 2+)"
+                )
 
         elif bias == "Bearish":
 
             if zone != "Premium":
                 reasons.append("Bearish setup outside Premium Zone")
 
-            if not bearish_confluence:
-                reasons.append("Missing unfilled Bearish FVG / unmitigated Order Block")
+            if not bearish_sniper_confluence:
+                reasons.append(
+                    f"Missing sniper confluence ({bearish_factor_count}/3: "
+                    "sweep + Order Block + FVG, need 2+)"
+                )
 
         reasons.append("Institutional execution filter blocked entry")
 
@@ -520,6 +546,9 @@ def build_signal(candles, macro=None, entry_label="M15", htf_data=None, as_of=No
         "execution": {
 
             "htf_aligned": htf_aligned,
+            "scalp_htf_bias": scalp_htf_bias,
+            "htf_aligned_slow": htf_aligned_slow,
+            "htf_bias_slow": htf_bias,
 
             "premium_discount_zone": zone,
 

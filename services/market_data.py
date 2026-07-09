@@ -24,6 +24,19 @@ SYMBOL = "XAUUSD"
 EXCHANGE = "FOREXCOM"
 FALLBACK_EXCHANGE = "OANDA"
 
+# Shared timeframe-label -> tvDatafeed Interval map, so any caller that
+# only has a trade's `timeframe` string (e.g. ExecutionEngine checking
+# SL/TP against live data) can fetch candles at the SAME resolution the
+# trade's levels were actually calculated on, instead of guessing or
+# falling back to a default that may not match.
+TIMEFRAME_INTERVALS = {
+    "M1": Interval.in_1_minute,
+    "M3": Interval.in_3_minute,
+    "M5": Interval.in_5_minute,
+    "M15": Interval.in_15_minute,
+    "M30": Interval.in_30_minute,
+}
+
 # Correlated instruments used for macro confluence (services/macro_context.py).
 # All served by TradingView under the TVC exchange -- no extra API keys needed.
 MACRO_SYMBOLS = {
