@@ -9,7 +9,7 @@ CONFIDENCE_THRESHOLD = 85
 def run_backtest(candles, htf_data, account_balance, risk_percent,
                   entry_label="M15", lookback=100, log_file="backtest_journal.json",
                   progress_every=500, max_wait_bars=20,
-                  max_positions=2, single_side=True):
+                  max_positions=2, single_side=True, instrument="XAUUSD"):
     """
     Walk-forward backtest over historical `candles` (oldest-first).
 
@@ -89,6 +89,7 @@ def run_backtest(candles, htf_data, account_balance, risk_percent,
             trade = executor.open_trade(
                 signal=signal, entry=entry, risk=risk, bar_index=i,
                 timeframe=entry_label, max_positions=max_positions, single_side=single_side,
+                instrument=instrument,
             )
             if trade:
                 signals_fired += 1

@@ -78,10 +78,67 @@ class ExecutionEngine:
         return len(active) >= max_positions
 
     # =====================================================
+    # 1b. SESSION-CAP / CONSECUTIVE-LOSS GATE (opt-in -- Fib Golden
+    #     Zone Pullback, or any strategy that stamps a `session_label`)
+    # =====================================================
+    def _session_gate_blocked(self, signal, timeframe, session_label, max_per_session, max_consecutive_losses):
+        """
+        Enforces two "non-negotiable" risk rules that, unlike the SMC
+        position cap above, are session/day-scoped rather than purely
+        concurrent-exposure-scoped: max N trades per named session
+        (e.g. "2026-07-09_London"), and a same-day consecutive-loss
+        circuit breaker.
+
+        Strategy functions are stateless by convention in this codebase
+        (they only see candles, not trade history), so this state lives
+        here in the one place that actually holds trade history --
+        ExecutionEngine -- keyed off the `session_label` the strategy
+        stamps onto its own signal. `session_label` is expected in the
+        form "<date>_<session-name>"; the date prefix is reused to scope
+        the consecutive-loss check to "today" without needing a separate
+        date field.
+        """
+
+        if session_label is None:
+            return False
+
+        strategy = signal.get("strategy", "SMC")
+        day = session_label.split("_")[0]
+
+        if max_per_session is not None:
+            session_trades = [
+                t for t in self.trades
+                if t.get("strategy", "SMC") == strategy
+                and t.get("timeframe") == timeframe
+                and t.get("session_label") == session_label
+            ]
+            if len(session_trades) >= max_per_session:
+                return True
+
+        if max_consecutive_losses is not None:
+            day_trades = sorted(
+                (
+                    t for t in self.trades
+                    if t.get("strategy", "SMC") == strategy
+                    and t.get("timeframe") == timeframe
+                    and t.get("status") == "CLOSED"
+                    and (t.get("session_label") or "").startswith(day)
+                ),
+                key=lambda t: t["id"],
+            )
+            recent = day_trades[-max_consecutive_losses:]
+            if len(recent) == max_consecutive_losses and all(t.get("result") == "LOSS" for t in recent):
+                return True
+
+        return False
+
+    # =====================================================
     # 2. OPEN TRADE (EXECUTION ENTRY)
     # =====================================================
     def open_trade(self, signal, entry, risk, bar_index=None,
-                   timeframe=None, max_positions=None, single_side=False):
+                   timeframe=None, max_positions=None, single_side=False,
+                   session_label=None, max_per_session=None, max_consecutive_losses=None,
+                   instrument="XAUUSD"):
         """
         Create a new trade if valid.
 
@@ -98,6 +155,13 @@ class ExecutionEngine:
         _position_blocked()). Callers that omit `max_positions` keep the
         broadcast-everything behaviour.
 
+        The Fib Golden Zone Pullback path opts INTO a session-scoped cap
+        by passing `session_label` + `max_per_session` /
+        `max_consecutive_losses` (see _session_gate_blocked()): at most
+        N trades per named session, and a same-day consecutive-loss
+        circuit breaker. Independent of the SMC position cap above --
+        both can be active at once, or neither.
+
         *_LIMIT entries (a sniper entry waiting for a retracement into
         an order block) open as PENDING, not OPEN -- no capital is at
         risk and no WIN/LOSS is possible until price actually trades to
@@ -113,6 +177,11 @@ class ExecutionEngine:
         ):
             return None
 
+        if (max_per_session is not None or max_consecutive_losses is not None) and self._session_gate_blocked(
+            signal, timeframe, session_label, max_per_session, max_consecutive_losses
+        ):
+            return None
+
         entry_type = entry.get("entry_type")
         is_limit = isinstance(entry_type, str) and entry_type.endswith("_LIMIT")
 
@@ -123,6 +192,8 @@ class ExecutionEngine:
             # Market Context
             "strategy": signal.get("strategy", "SMC"),
             "timeframe": timeframe,
+            "instrument": instrument,
+            "session_label": session_label,
             "price": signal["price"],
             "bias": signal["bias"],
             "confidence": signal["confidence"],
@@ -292,7 +363,7 @@ class ExecutionEngine:
                 # callers with no timestamp to key the session off of.
                 spread_cost = 0
                 if isinstance(price, dict) and "time" in price and remaining_size:
-                    spread_cost = get_spread(price["time"]) * remaining_size
+                    spread_cost = get_spread(price["time"], t.get("instrument", "XAUUSD")) * remaining_size
                     remainder_pnl -= spread_cost
 
                 total_pnl = (t.get("tp1_pnl") or 0) + remainder_pnl
@@ -309,6 +380,67 @@ class ExecutionEngine:
 
                 self._save()
                 return t
+
+        return None
+
+    # =====================================================
+    # 2a. MANUAL CLOSE (exit rules update_trade() can't express)
+    # =====================================================
+    def close_trade_manual(self, trade_id, exit_price, time_str=None):
+        """
+        Closes an OPEN trade at an explicit price, for exit rules that
+        aren't a fixed SL/TP2 price level set at entry -- e.g. the EMA
+        20/50 Cross-Retest strategy's "closes beyond the 50 EMA" exit,
+        where the 50 EMA itself moves every bar, and the rule is
+        explicitly CLOSE-confirmed only ("wick stops kill the trade
+        early" -- update_trade()'s intrabar high/low SL check is
+        exactly the wick-sensitive behavior that strategy deliberately
+        avoids). PnL/spread accounting mirrors update_trade()'s final-
+        exit branch exactly, just triggered externally by the caller's
+        own exit logic instead of comparing against stop_loss/take_profit_2.
+
+        WIN/LOSS/PARTIAL_WIN is inferred from the actual realized PnL
+        sign rather than assumed, since a moving-target exit (unlike a
+        fixed SL/TP) can land on either side of breakeven.
+        """
+
+        for t in self.trades:
+            if t["id"] != trade_id or t["status"] != "OPEN":
+                continue
+
+            bias = t.get("bias")
+            entry = t.get("entry")
+            position_size = t.get("position_size") or 0
+            remaining_size = (position_size / 2) if t.get("tp1_hit") else position_size
+
+            if entry is not None and remaining_size:
+                remainder_pnl = (exit_price - entry) * remaining_size if bias == "Bullish" \
+                    else (entry - exit_price) * remaining_size
+            else:
+                remainder_pnl = 0
+
+            spread_cost = 0
+            if time_str and remaining_size:
+                spread_cost = get_spread(time_str, t.get("instrument", "XAUUSD")) * remaining_size
+                remainder_pnl -= spread_cost
+
+            total_pnl = (t.get("tp1_pnl") or 0) + remainder_pnl
+
+            if total_pnl > 0:
+                result = "WIN"
+            elif t.get("tp1_hit"):
+                result = "PARTIAL_WIN"
+            else:
+                result = "LOSS"
+
+            t["status"] = "CLOSED"
+            t["result"] = result
+            t["exit_price"] = round(exit_price, 2)
+            t["spread_cost"] = round(spread_cost, 2)
+            t["pnl"] = round(total_pnl, 2)
+
+            self._save()
+            return t
 
         return None
 

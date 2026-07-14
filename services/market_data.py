@@ -24,6 +24,38 @@ SYMBOL = "XAUUSD"
 EXCHANGE = "FOREXCOM"
 FALLBACK_EXCHANGE = "OANDA"
 
+# Multi-instrument config -- FOREXCOM primary / OANDA fallback matches
+# the exchange pair already proven to work for XAUUSD; confirmed live
+# that XAGUSD/EURJPY/GBPJPY all resolve on both.
+#
+# pip_size and the spread estimates are NOT verified real broker data
+# -- pip_size follows each instrument's standard quote-decimal
+# convention (JPY crosses: 2nd decimal; XAUUSD: 1st decimal, i.e.
+# $0.10; XAGUSD: 3rd decimal, i.e. $0.001, since silver quotes to 3dp
+# and $0.10 would be absurdly wide for a ~$30-60 instrument). Spread
+# figures are rough, typical-retail-CFD ballparks in the instrument's
+# own quote units, same "conservative flat estimate" framing as the
+# original XAUUSD numbers in spread_model.py -- treat them as
+# directionally reasonable, not calibrated.
+INSTRUMENTS = {
+    "XAUUSD": {
+        "symbol": "XAUUSD", "exchange": "FOREXCOM", "fallback_exchange": "OANDA",
+        "pip_size": 0.1, "spread_london_ny": 0.20, "spread_asian": 0.40,
+    },
+    "XAGUSD": {
+        "symbol": "XAGUSD", "exchange": "FOREXCOM", "fallback_exchange": "OANDA",
+        "pip_size": 0.001, "spread_london_ny": 0.03, "spread_asian": 0.06,
+    },
+    "EURJPY": {
+        "symbol": "EURJPY", "exchange": "FOREXCOM", "fallback_exchange": "OANDA",
+        "pip_size": 0.01, "spread_london_ny": 0.02, "spread_asian": 0.04,
+    },
+    "GBPJPY": {
+        "symbol": "GBPJPY", "exchange": "FOREXCOM", "fallback_exchange": "OANDA",
+        "pip_size": 0.01, "spread_london_ny": 0.04, "spread_asian": 0.07,
+    },
+}
+
 # Shared timeframe-label -> tvDatafeed Interval map, so any caller that
 # only has a trade's `timeframe` string (e.g. ExecutionEngine checking
 # SL/TP against live data) can fetch candles at the SAME resolution the
@@ -81,6 +113,23 @@ def get_xauusd_candles(interval=Interval.in_15_minute, n_bars=100, retries=4, re
     return get_candles(
         SYMBOL, EXCHANGE, interval=interval, n_bars=n_bars,
         retries=retries, retry_delay=retry_delay, fallback_exchange=FALLBACK_EXCHANGE,
+    )
+
+
+def get_instrument_candles(instrument, interval=Interval.in_15_minute, n_bars=100, retries=4, retry_delay=2):
+    """
+    Generic multi-instrument fetch, keyed off INSTRUMENTS above.
+    get_xauusd_candles() is kept as-is (not rewritten to call this) so
+    every existing caller (scanner.py, ai.py, run_backtest.py, etc.)
+    stays untouched -- this is purely additive for the new pairs.
+    """
+    if instrument not in INSTRUMENTS:
+        raise ValueError(f"Unknown instrument: {instrument}")
+
+    cfg = INSTRUMENTS[instrument]
+    return get_candles(
+        cfg["symbol"], cfg["exchange"], interval=interval, n_bars=n_bars,
+        retries=retries, retry_delay=retry_delay, fallback_exchange=cfg["fallback_exchange"],
     )
 
 

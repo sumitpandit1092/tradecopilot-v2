@@ -4,7 +4,7 @@ from services.execution_engine import ExecutionEngine
 def run_strategy_backtest(strategy_fn, m5_candles, m15_candles=None, account_balance=1000,
                            risk_percent=1.0, lookback_5m=100, lookback_15m=100,
                            log_file="backtest_journal.json", needs_15m=True,
-                           max_wait_bars=20, progress_every=1000):
+                           max_wait_bars=20, progress_every=1000, instrument="XAUUSD"):
     """
     Generic walk-forward backtester for the indicator-based strategies
     (EMA Pullback, BB Reversion, Session Breakout). Unlike the SMC
@@ -62,7 +62,7 @@ def run_strategy_backtest(strategy_fn, m5_candles, m15_candles=None, account_bal
 
         if result is not None:
             signal, entry, risk = result
-            trade_record = executor.open_trade(signal=signal, entry=entry, risk=risk, bar_index=i)
+            trade_record = executor.open_trade(signal=signal, entry=entry, risk=risk, bar_index=i, instrument=instrument)
             if trade_record:
                 signals_fired += 1
 
