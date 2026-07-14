@@ -3,6 +3,16 @@ from datetime import datetime
 
 from services.spread_model import get_spread
 
+# Strategies that manage their own exits (close-confirmed stops, a
+# moving-target invalidation level, etc.) instead of a fixed SL/TP2
+# price level checked against intrabar high/low. refresh_open_trades()
+# must NOT touch these trades -- its standard wick-based update_trade()
+# check would directly contradict the strategy's own exit design (e.g.
+# EMA 20/50 Cross-Retest's stop is explicitly close-only, "wick stops
+# kill the trade early"). Each such strategy is responsible for its own
+# per-cycle exit management via close_trade_manual().
+SELF_MANAGED_STRATEGIES = {"EMA 20/50 Cross-Retest"}
+
 
 def _parse_time(value):
     if not value:
@@ -555,7 +565,10 @@ class ExecutionEngine:
         back to M15, same as before.
         """
 
-        open_trades = self.active_trades()
+        open_trades = [
+            t for t in self.active_trades()
+            if t.get("strategy") not in SELF_MANAGED_STRATEGIES
+        ]
 
         if not open_trades:
             return []

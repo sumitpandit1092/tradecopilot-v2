@@ -14,8 +14,10 @@ from services.risk_engine import build_risk_plan
 from services.execution_engine import ExecutionEngine
 from services.macro_context import build_macro_context
 from services.router import SignalRouter
+from services.indicators import calculate_ema_series
 
 import services.strategy_session_breakout as session_breakout
+import services.strategy_ema_cross_retest as ema_cross_retest
 
 
 # Daily/H4/H1 HTF bias is still computed via timeframe_engine.py --
@@ -206,22 +208,125 @@ def _scan_extra_strategies(executor, router, last_seen_extra):
             _log(f"[{name}] Duplicate setup -- already have a matching OPEN/PENDING trade, skipping alert.")
 
 
-def run_cycle(executor, router, timeframes, last_seen, last_seen_extra):
+def _scan_ema_cross_retest(executor, router, last_seen_ema_cross):
+    """
+    EMA 20/50 Cross-Retest, M5 only -- backtested M3/M5/M15/M30/H1, only
+    M5 was profitable with the strategy's own close-only exit as
+    specified (+$122.03); a 2.0x wick-based hard-loss-cap variant helped
+    M15/M30 but made M5 worse (+$51.13), so M5 runs uncapped here.
+
+    Fully self-contained trade management, NOT routed through
+    refresh_open_trades()/update_trade() (see SELF_MANAGED_STRATEGIES in
+    execution_engine.py) -- this strategy's stop is explicitly
+    close-confirmed only ("wick stops kill the trade early"), which the
+    standard intrabar-high/low SL checker would violate. Mirrors
+    run_ema_cross_retest_backtest.py's per-bar exit logic exactly, just
+    driven by the live latest candle instead of a walk-forward loop.
+    """
+
+    candles = get_xauusd_candles(interval=Interval.in_5_minute, n_bars=200)
+
+    if not candles or len(candles) < ema_cross_retest.EMA_SLOW + 5:
+        return
+
+    latest_candle = candles[-1]
+    strategy_name = ema_cross_retest.STRATEGY_NAME
+
+    open_trades = [
+        t for t in executor.active_trades()
+        if t.get("strategy") == strategy_name
+    ]
+
+    # --- Manage any OPEN trade (close-only exit, checked every cycle --
+    #     not gated by the new-candle dedup below, so an intrabar TP
+    #     wick or a same-candle close-confirmation isn't missed while
+    #     waiting for the next 5m candle to fully close). ---
+    for trade in open_trades:
+        bias = trade["bias"]
+        entry = trade["entry"]
+        stop_loss = trade["stop_loss"]
+        tp = trade["take_profit_2"]
+        close = latest_candle["close"]
+
+        hit_tp = (bias == "Bullish" and latest_candle["high"] >= tp) or \
+                 (bias == "Bearish" and latest_candle["low"] <= tp)
+        if hit_tp:
+            closed = executor.close_trade_manual(trade["id"], tp, latest_candle["time"])
+            if closed:
+                _log(f"[{strategy_name}] Trade #{closed['id']} closed -- TP hit ({closed['result']})")
+                router.fire_trade_closed(closed)
+            continue
+
+        hit_fixed_sl = (bias == "Bullish" and close <= stop_loss) or \
+                        (bias == "Bearish" and close >= stop_loss)
+        if hit_fixed_sl:
+            closed = executor.close_trade_manual(trade["id"], close, latest_candle["time"])
+            if closed:
+                _log(f"[{strategy_name}] Trade #{closed['id']} closed -- close-confirmed SL ({closed['result']})")
+                router.fire_trade_closed(closed)
+            continue
+
+        ema_slow_series = calculate_ema_series(candles, ema_cross_retest.EMA_SLOW)
+        ema_now = ema_slow_series[-1] if ema_slow_series else None
+        if ema_now is not None:
+            invalidated = (bias == "Bullish" and close < ema_now) or \
+                          (bias == "Bearish" and close > ema_now)
+            if invalidated:
+                closed = executor.close_trade_manual(trade["id"], close, latest_candle["time"])
+                if closed:
+                    _log(f"[{strategy_name}] Trade #{closed['id']} closed -- 50 EMA close-invalidation ({closed['result']})")
+                    router.fire_trade_closed(closed)
+
+    # --- Look for a new entry -- one trade at a time, same as the backtest. ---
+    latest_candle_time = latest_candle["time"]
+    if last_seen_ema_cross.get(strategy_name) == latest_candle_time:
+        return
+    last_seen_ema_cross[strategy_name] = latest_candle_time
+
+    if any(t.get("strategy") == strategy_name for t in executor.active_trades()):
+        return  # still managing the trade closed/opened above this cycle
+
+    try:
+        result = ema_cross_retest.build_signal(candles, account_balance=ACCOUNT_BALANCE, risk_percent=RISK_PERCENT)
+    except Exception as e:
+        _log(f"[{strategy_name}] Error: {e}")
+        return
+
+    if result is None:
+        return
+
+    signal, entry, risk = result
+    _log(f"[{strategy_name}] {signal.get('recommendation')} setup detected (confidence {signal.get('confidence')})")
+
+    trade_record = executor.open_trade(signal=signal, entry=entry, risk=risk, timeframe="M5")
+
+    if trade_record:
+        _log(f"[{strategy_name}] Trade #{trade_record['id']} {trade_record['status']} ({trade_record['entry_type']})")
+        router.fire_signal(signal, entry, risk, timeframe=strategy_name)
+
+
+def run_cycle(executor, router, timeframes, last_seen, last_seen_extra, last_seen_ema_cross=None):
     """
     Runs one full scan cycle -- the body of the continuous loop in
     run() below, pulled out so a single-pass/cron-style caller (e.g.
     run_scanner_once.py, for hosting on a schedule that can't keep a
     process resident) can run exactly one cycle and persist
-    `last_seen`/`last_seen_extra` itself between invocations.
+    `last_seen`/`last_seen_extra`/`last_seen_ema_cross` itself between
+    invocations.
 
-    Mutates `last_seen` and `last_seen_extra` in place (same dedup
-    role they play inside run()'s loop).
+    Mutates `last_seen`/`last_seen_extra`/`last_seen_ema_cross` in
+    place (same dedup role they play inside run()'s loop).
     """
+
+    if last_seen_ema_cross is None:
+        last_seen_ema_cross = {}
 
     # refresh_open_trades() returns any trade touched this cycle --
     # either newly CLOSED (SL/TP2 resolved) or still OPEN with
     # tp1_hit just flipped True (partial close at TP1, stop moved to
-    # breakeven). Same list, distinguish by status.
+    # breakeven). Same list, distinguish by status. Skips
+    # SELF_MANAGED_STRATEGIES trades (EMA Cross-Retest) -- those are
+    # handled by _scan_ema_cross_retest() below instead.
     touched_trades = executor.refresh_open_trades()
     for trade in touched_trades:
         if trade["status"] == "CLOSED":
@@ -238,12 +343,13 @@ def run_cycle(executor, router, timeframes, last_seen, last_seen_extra):
         _scan_smc_timeframe(label, candles, executor, router, macro, last_seen)
 
     _scan_extra_strategies(executor, router, last_seen_extra)
+    _scan_ema_cross_retest(executor, router, last_seen_ema_cross)
 
 
 def run(poll_interval=None, router=None, executor=None, timeframes=None):
     """
-    Continuously polls the market on a timer and runs 2 independent
-    signal sources every cycle:
+    Continuously polls the market on a timer and runs 3 independent
+    signal sources every cycle, all XAUUSD/M5 only:
 
     - SMC (structure/liquidity/FVG/OB) across SCAN_TIMEFRAMES (M5 only
       -- see that constant's comment for why M1/M3/M15/M30 were tried
@@ -254,12 +360,26 @@ def run(poll_interval=None, router=None, executor=None, timeframes=None):
       found to systematically filter out the strongest continuations;
       fixed to enter immediately instead). Runs on its own M5/M15 fetch,
       independent of SMC's SCAN_TIMEFRAMES (see _scan_extra_strategies).
+    - EMA 20/50 Cross-Retest -- asymmetric entry (3rd retest for longs,
+      1st for shorts), close-confirmed-only exit. Backtested across
+      M3/M5/M15/M30/H1; only M5 was profitable with the pure close-only
+      exit as specified, so it runs M5-only here (see
+      _scan_ema_cross_retest). Self-manages its own trades -- excluded
+      from refresh_open_trades()'s standard wick-based SL/TP check (see
+      SELF_MANAGED_STRATEGIES in execution_engine.py), since that would
+      contradict its explicitly close-only stop design.
 
-    Both share one ExecutionEngine (one trade journal -- no duplicate-
-    trade blocking; every qualifying signal opens its own trade, since
-    this broadcasts to many subscribers rather than managing one
-    account) and one SignalRouter (Telegram), so every alert is tagged
-    with which system fired it.
+    EMA Pullback, BB Reversion, and Fib Golden Zone Pullback were all
+    backtested (see project history) but are NOT wired in here --
+    EMA Pullback/BB Reversion underperformed, and Fib Golden Zone's
+    backtest sample was too small to trust yet.
+
+    All three share one ExecutionEngine (one trade journal -- no
+    duplicate-trade blocking for the broadcast strategies; every
+    qualifying signal opens its own trade, since this broadcasts to
+    many subscribers rather than managing one account) and one
+    SignalRouter (Telegram), so every alert is tagged with which system
+    fired it.
     """
 
     interval = poll_interval or SCAN_INTERVAL_SECONDS
@@ -269,15 +389,17 @@ def run(poll_interval=None, router=None, executor=None, timeframes=None):
 
     last_seen = {}
     last_seen_extra = {}
+    last_seen_ema_cross = {}
 
     _log(
         f"TradeCopilot Scanner started -- polling every {interval}s. "
-        f"SMC across {list(timeframes.keys())}, plus {[s[0] for s in EXTRA_STRATEGIES]} (XAUUSD)"
+        f"SMC across {list(timeframes.keys())}, plus {[s[0] for s in EXTRA_STRATEGIES]} "
+        f"and {ema_cross_retest.STRATEGY_NAME} (M5) (XAUUSD)"
     )
 
     while True:
         try:
-            run_cycle(executor, router, timeframes, last_seen, last_seen_extra)
+            run_cycle(executor, router, timeframes, last_seen, last_seen_extra, last_seen_ema_cross)
         except Exception as e:
             _log(f"Error in scan loop: {e}")
 
