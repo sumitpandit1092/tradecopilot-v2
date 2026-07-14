@@ -210,21 +210,22 @@ def _scan_extra_strategies(executor, router, last_seen_extra):
         # stacked identical risk, not diversification. The old
         # "broadcasts to many subscribers, not a single account"
         # rationale for leaving this uncapped doesn't hold for a single
-        # live account. Capped the same way as SMC (see
-        # _scan_smc_timeframe): max 2 concurrent, one direction only.
+        # live account. First capped at 2 (matching SMC's cap), then
+        # tightened to 1 -- one live Session Breakout trade at a time,
+        # no same-direction stacking at all.
         # Tagged "M5" (not `name`) so refresh_open_trades() checks it
         # against the right resolution -- these strategies enter on M5
         # candle closes, same as the SMC/M5 path.
         trade_record = executor.open_trade(
             signal=signal, entry=entry, risk=risk,
-            timeframe="M5", max_positions=2, single_side=True,
+            timeframe="M5", max_positions=1, single_side=True,
         )
 
         if trade_record:
             _log(f"[{name}] Trade #{trade_record['id']} {trade_record['status']} ({trade_record['entry_type']})")
             router.fire_signal(signal, entry, risk, timeframe=name)
         else:
-            _log(f"[{name}] Position cap reached (2/side) or opposite side live -- skipping to avoid overtrading.")
+            _log(f"[{name}] Position cap reached (1/side) or opposite side live -- skipping to avoid overtrading.")
 
 
 def _scan_ema_cross_retest(executor, router, last_seen_ema_cross):
@@ -395,10 +396,10 @@ def run(poll_interval=None, router=None, executor=None, timeframes=None):
 
     All three share one ExecutionEngine (one trade journal) and one
     SignalRouter (Telegram), so every alert is tagged with which system
-    fired it. Session Breakout is capped at 2 concurrent same-direction
-    trades per _scan_extra_strategies() -- the original "no cap, this
-    broadcasts to many subscribers" design let a sustained breakout
-    stack unlimited same-direction trades live (see that function's
+    fired it. Session Breakout is capped at 1 concurrent trade per
+    _scan_extra_strategies() -- the original "no cap, this broadcasts
+    to many subscribers" design let a sustained breakout stack
+    unlimited same-direction trades live (see that function's
     comment), which doesn't hold up when this is one account's actual
     exposure, not an alert feed.
     """
