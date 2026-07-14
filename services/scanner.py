@@ -41,7 +41,12 @@ SCAN_TIMEFRAMES = {
 # EMA Pullback and BB Reversion were tried and dropped -- backtested as
 # net losers even after execution-engine corrections. Session Breakout
 # stayed after its retest-entry bug was found and fixed (direct entry
-# at breakout confirmation instead of waiting for a retracement).
+# at breakout confirmation instead of waiting for a retracement), and
+# after a second live bug was found and fixed: no position cap meant a
+# sustained breakout condition (price closing above range_high candle
+# after candle) fired a fresh same-direction trade every single M5
+# cycle with no limit -- 26 concurrent open BUYs on 2026-07-14, all
+# stacked risk, no diversification (see _scan_extra_strategies()).
 # `needs_15m` controls whether the strategy function is called as
 # fn(m15, m5, ...) or fn(m5, ...).
 EXTRA_STRATEGIES = [
@@ -196,16 +201,30 @@ def _scan_extra_strategies(executor, router, last_seen_extra):
             f"(confidence {signal.get('confidence')})"
         )
 
+        # FIXED: this had NO position cap at all -- on 2026-07-14 the
+        # opening-range breakout condition stayed true for hours
+        # straight (price kept closing above range_high candle after
+        # candle), and with no cap and no dedup it fired a fresh
+        # same-direction BUY on every single M5 candle: 26 concurrent
+        # OPEN positions, all BUY, all within $8 of each other --
+        # stacked identical risk, not diversification. The old
+        # "broadcasts to many subscribers, not a single account"
+        # rationale for leaving this uncapped doesn't hold for a single
+        # live account. Capped the same way as SMC (see
+        # _scan_smc_timeframe): max 2 concurrent, one direction only.
         # Tagged "M5" (not `name`) so refresh_open_trades() checks it
         # against the right resolution -- these strategies enter on M5
         # candle closes, same as the SMC/M5 path.
-        trade_record = executor.open_trade(signal=signal, entry=entry, risk=risk, timeframe="M5")
+        trade_record = executor.open_trade(
+            signal=signal, entry=entry, risk=risk,
+            timeframe="M5", max_positions=2, single_side=True,
+        )
 
         if trade_record:
             _log(f"[{name}] Trade #{trade_record['id']} {trade_record['status']} ({trade_record['entry_type']})")
             router.fire_signal(signal, entry, risk, timeframe=name)
         else:
-            _log(f"[{name}] Duplicate setup -- already have a matching OPEN/PENDING trade, skipping alert.")
+            _log(f"[{name}] Position cap reached (2/side) or opposite side live -- skipping to avoid overtrading.")
 
 
 def _scan_ema_cross_retest(executor, router, last_seen_ema_cross):
@@ -374,12 +393,14 @@ def run(poll_interval=None, router=None, executor=None, timeframes=None):
     EMA Pullback/BB Reversion underperformed, and Fib Golden Zone's
     backtest sample was too small to trust yet.
 
-    All three share one ExecutionEngine (one trade journal -- no
-    duplicate-trade blocking for the broadcast strategies; every
-    qualifying signal opens its own trade, since this broadcasts to
-    many subscribers rather than managing one account) and one
+    All three share one ExecutionEngine (one trade journal) and one
     SignalRouter (Telegram), so every alert is tagged with which system
-    fired it.
+    fired it. Session Breakout is capped at 2 concurrent same-direction
+    trades per _scan_extra_strategies() -- the original "no cap, this
+    broadcasts to many subscribers" design let a sustained breakout
+    stack unlimited same-direction trades live (see that function's
+    comment), which doesn't hold up when this is one account's actual
+    exposure, not an alert feed.
     """
 
     interval = poll_interval or SCAN_INTERVAL_SECONDS
