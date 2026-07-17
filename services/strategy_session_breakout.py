@@ -6,6 +6,29 @@ STRATEGY_NAME = "Session Breakout"
 RANGE_HOUR = 7
 RANGE_END_MINUTE = 30
 
+# FIXED (factor analysis on 211 backtest + 555 live trades, both
+# independently): entries with R:R >= 2.3 to TP2 were the single worst
+# bucket in both datasets (22.5% WR / -$1,949 live, on 307 of 555
+# trades -- over half the book), while entries never even breached
+# breakeven-adjusted risk beyond that in the OTHER direction (a
+# genuine edge only showed up in the 1.8-2.3 band, the sole
+# consistently-positive bucket in both datasets). Since TP2 = 2x
+# range_height and SL is roughly ATR-bounded, R:R is a direct function
+# of range_height/ATR -- exactly the same ratio the (separately
+# miscalibrated) confidence score also scales with, which is why a
+# "big breakout range" looked confident but performed worst.
+MAX_RR = 2.3
+
+# FIXED (same analysis, live-only since backtest timestamps are
+# wall-clock save time, not real candle time): hours 13-15 UTC (NY
+# open + early session) were the standout window -- hour 14 alone was
+# +$145.74 at 82.2% WR on 45 trades. Hours 8-12 and 17-23 UTC were
+# where nearly all the damage happened (e.g. hour 9: 2.5% WR, -$394.76
+# on 40 trades; hour 18: 10.9% WR, -$376.12 on 46). Restricting entries
+# to this window is a live, not backtest-only, finding.
+ENTRY_WINDOW_START_HOUR = 13
+ENTRY_WINDOW_END_HOUR = 16
+
 
 def _today(candles):
     return candles[-1]["time"].split(" ")[0]
@@ -46,6 +69,11 @@ def _after_range_window(candle, today):
     return hour > RANGE_HOUR or (hour == RANGE_HOUR and minute >= RANGE_END_MINUTE)
 
 
+def _in_entry_window(candle):
+    hour = int(candle["time"].split(" ")[1].split(":")[0])
+    return ENTRY_WINDOW_START_HOUR <= hour < ENTRY_WINDOW_END_HOUR
+
+
 def build_signal(m15_candles, m5_candles, account_balance=1000, risk_percent=1.0):
     """
     Opening range breakout: the first 1-2 15m candles of the London
@@ -64,6 +92,10 @@ def build_signal(m15_candles, m5_candles, account_balance=1000, risk_percent=1.0
     almost always meant "the breakout just kept running without
     looking back," which is precisely the strongest continuation
     pattern, systematically filtered out by waiting for a pullback.
+
+    Entries are further restricted to ENTRY_WINDOW_START_HOUR-
+    ENTRY_WINDOW_END_HOUR UTC and R:R < MAX_RR -- see those constants'
+    comments for the factor-analysis evidence behind both.
 
     Simplification vs the written spec: volume confirmation is
     skipped -- tvDatafeed's forex volume field is unreliable/often
@@ -92,6 +124,9 @@ def build_signal(m15_candles, m5_candles, account_balance=1000, risk_percent=1.0
     last = m5_candles[-1]
 
     if not _after_range_window(last, today):
+        return None
+
+    if not _in_entry_window(last):
         return None
 
     bias = None
@@ -144,6 +179,9 @@ def build_signal(m15_candles, m5_candles, account_balance=1000, risk_percent=1.0
 
     reward = abs(take_profit_2 - entry)
     rr = round(reward / sl_distance, 2) if sl_distance else 0
+
+    if rr >= MAX_RR:
+        return None  # see MAX_RR comment -- this bucket was the worst performer in both backtest and live data
 
     risk_amount = account_balance * (risk_percent / 100)
     position_size = risk_amount / sl_distance
