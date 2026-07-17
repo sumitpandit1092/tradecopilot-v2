@@ -33,9 +33,21 @@ import services.strategy_ema_cross_retest as ema_cross_retest
 # last: net-positive but the weaker of the two survivors (+$25.34,
 # 37.04% WR vs M5's +$147.01, 48.57% WR) on the same backtest run --
 # M5 alone is the one timeframe with a real, consistent edge.
-SCAN_TIMEFRAMES = {
-    "M5": Interval.in_5_minute,
-}
+#
+# PAUSED live 2026-07-17: M5 live win rate had fallen to 26.92% (52
+# trades, -$274.93), well under its 48.57% backtest, with the 8 most
+# recent closed trades all LOSSES, all Bearish. Suspected cause: the
+# bearish-outperforms-bullish pattern seen in every backtest/live
+# dataset this session was very likely just gold's sustained downtrend
+# during those windows, not a durable edge -- an unbroken Bearish
+# losing streak is consistent with that trend having stalled or
+# turned, which would flip the same mechanism against the engine.
+# Not yet confirmed (were mid-way through checking recent Daily/H4/H1
+# structure when paused). Left as an empty dict rather than removing
+# the SMC path entirely -- _scan_smc_timeframe/run_backtest.py are
+# untouched, this is a live on/off switch, easy to re-enable once the
+# trend question is settled.
+SCAN_TIMEFRAMES = {}
 
 # Rule-based indicator strategies, run in parallel with SMC above.
 # EMA Pullback and BB Reversion were tried and dropped -- backtested as
@@ -368,13 +380,15 @@ def run_cycle(executor, router, timeframes, last_seen, last_seen_extra, last_see
 
 def run(poll_interval=None, router=None, executor=None, timeframes=None):
     """
-    Continuously polls the market on a timer and runs 3 independent
-    signal sources every cycle, all XAUUSD/M5 only:
+    Continuously polls the market on a timer and runs up to 3
+    independent signal sources every cycle, all XAUUSD/M5 only:
 
-    - SMC (structure/liquidity/FVG/OB) across SCAN_TIMEFRAMES (M5 only
-      -- see that constant's comment for why M1/M3/M15/M30 were tried
-      and dropped), gated on a real 2-of-3 sniper confluence
-      requirement and a fast H1-only HTF alignment check.
+    - SMC (structure/liquidity/FVG/OB) across SCAN_TIMEFRAMES -- PAUSED
+      as of 2026-07-17 (SCAN_TIMEFRAMES is an empty dict; see that
+      constant's comment for why). Loop below simply has nothing to
+      iterate when paused, so no code path changes, just zero SMC
+      scans per cycle. Gated on a real 2-of-3 sniper confluence
+      requirement and a fast H1-only HTF alignment check when active.
     - Session Breakout -- direct market entry at breakout confirmation
       (its original "wait for a retest" design was backtested and
       found to systematically filter out the strongest continuations;
@@ -413,9 +427,10 @@ def run(poll_interval=None, router=None, executor=None, timeframes=None):
     last_seen_extra = {}
     last_seen_ema_cross = {}
 
+    smc_status = list(timeframes.keys()) if timeframes else "PAUSED"
     _log(
         f"TradeCopilot Scanner started -- polling every {interval}s. "
-        f"SMC across {list(timeframes.keys())}, plus {[s[0] for s in EXTRA_STRATEGIES]} "
+        f"SMC across {smc_status}, plus {[s[0] for s in EXTRA_STRATEGIES]} "
         f"and {ema_cross_retest.STRATEGY_NAME} (M5) (XAUUSD)"
     )
 
