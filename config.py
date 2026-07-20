@@ -18,7 +18,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 # =====================================================
 # SCANNER
 # =====================================================
-SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "30"))
+SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "60"))
 
 # How long a PENDING limit order can sit unfilled before it's cancelled
 # as stale. Without this, a retest-style limit order that price never

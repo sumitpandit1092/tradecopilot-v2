@@ -204,10 +204,18 @@ def render_trade_table():
 def render_live_feed():
     st.subheader("Live Signal Feed")
 
-    lines = load_log_tail(150)
+    # Heartbeat lines (added so Scanner Health always has a recent line
+    # to check, independent of whether anything actually happened --
+    # see services/scanner.py) are excluded here so real events aren't
+    # buried under a wall of "cycle complete" noise. Reads a much wider
+    # raw window than the display count before filtering, since a quiet
+    # stretch can be almost entirely heartbeats -- filtering AFTER a
+    # too-small tail could leave nothing real to show at all.
+    raw_lines = load_log_tail(3000)
+    lines = [l for l in raw_lines if "Heartbeat -- cycle complete" not in l][-150:]
 
     if not lines:
-        st.caption("No scanner.log found yet.")
+        st.caption("No scanner.log found yet, or nothing but heartbeats in the recent window.")
         return
 
     text = "".join(reversed(lines))
