@@ -7,7 +7,15 @@ Wants=network-online.target
 Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/tradecopilot-v2
-ExecStart=/home/ubuntu/tradecopilot-v2/venv/bin/python run_scanner.py
+# FIXED: Python fully-buffers stdout when it's not a TTY (i.e. always,
+# under systemd) -- over a long enough uptime this made scanner.log
+# (and even journald, for anything going through print() rather than
+# the `logging` module) go essentially silent for hours at a time,
+# even though the process was alive and working. The dashboard's
+# "Scanner Health" check reads scanner.log's last line, so a silent
+# buffer made a genuinely healthy scanner look "possibly stopped".
+# -u forces unbuffered stdout/stderr.
+ExecStart=/home/ubuntu/tradecopilot-v2/venv/bin/python -u run_scanner.py
 Restart=always
 RestartSec=10
 

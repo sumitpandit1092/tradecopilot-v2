@@ -377,6 +377,22 @@ def run_cycle(executor, router, timeframes, last_seen, last_seen_extra, last_see
     _scan_extra_strategies(executor, router, last_seen_extra)
     _scan_ema_cross_retest(executor, router, last_seen_ema_cross)
 
+    # FIXED: every _log() call above is conditional on something
+    # actually happening (a signal, a closed trade, an error). The ONLY
+    # unconditional per-cycle log line in this whole module used to be
+    # _scan_smc_timeframe()'s "Candle ... WAIT" line -- so with SMC
+    # paused (SCAN_TIMEFRAMES={}) and Session Breakout/EMA Cross-Retest
+    # both quiet for a stretch (expected: Session Breakout's window is
+    # now only ~3h/day, EMA Cross-Retest fires rarely by design),
+    # scanner.log went dark for 59+ hours straight, with the process
+    # completely healthy underneath -- confirmed live 2026-07-20. The
+    # dashboard's "Scanner Health" check has no other signal to go on
+    # besides scanner.log's last line, so a genuinely healthy scanner
+    # looked "possibly stopped" the whole time. This heartbeat
+    # guarantees a log line every cycle regardless of which strategies
+    # are active, independent of whether anything actually happened.
+    _log(f"Heartbeat -- cycle complete (SMC {'active: ' + str(list(timeframes.keys())) if timeframes else 'PAUSED'})")
+
 
 def run(poll_interval=None, router=None, executor=None, timeframes=None):
     """
