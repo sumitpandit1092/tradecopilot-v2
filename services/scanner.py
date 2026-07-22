@@ -34,20 +34,31 @@ import services.strategy_ema_cross_retest as ema_cross_retest
 # 37.04% WR vs M5's +$147.01, 48.57% WR) on the same backtest run --
 # M5 alone is the one timeframe with a real, consistent edge.
 #
-# PAUSED live 2026-07-17: M5 live win rate had fallen to 26.92% (52
-# trades, -$274.93), well under its 48.57% backtest, with the 8 most
-# recent closed trades all LOSSES, all Bearish. Suspected cause: the
-# bearish-outperforms-bullish pattern seen in every backtest/live
-# dataset this session was very likely just gold's sustained downtrend
-# during those windows, not a durable edge -- an unbroken Bearish
-# losing streak is consistent with that trend having stalled or
-# turned, which would flip the same mechanism against the engine.
-# Not yet confirmed (were mid-way through checking recent Daily/H4/H1
-# structure when paused). Left as an empty dict rather than removing
-# the SMC path entirely -- _scan_smc_timeframe/run_backtest.py are
-# untouched, this is a live on/off switch, easy to re-enable once the
-# trend question is settled.
-SCAN_TIMEFRAMES = {}
+# PAUSED live 2026-07-17 -> RE-ENABLED 2026-07-22: M5 live win rate had
+# fallen to 26.92% (52 trades, -$274.93), well under its 48.57%
+# backtest, with the 8 most recent closed trades all LOSSES, all
+# Bearish. Suspected cause: the bearish-outperforms-bullish pattern
+# seen in every backtest/live dataset this session was very likely
+# just gold's sustained downtrend during those windows, not a durable
+# edge -- an unbroken Bearish losing streak is consistent with that
+# trend having stalled or turned, which would flip the same mechanism
+# against the engine.
+#
+# Confirmed on re-check: H1 structure flipped to genuine Bullish
+# (HH/HL), price back above its own EMA50 -- and H1 is exactly the
+# reference build_scalp_htf_bias() uses for SMC's fast alignment gate
+# (see bias_engine.py), so this directly explains the SELL-heavy
+# losing streak: the engine was fighting a reversal on the very
+# timeframe its own gate is supposed to track. Daily/H4 hadn't fully
+# confirmed the reversal yet at re-enable time (still lower-highs
+# structure, Daily price still below its EMA50) -- only stabilizing
+# lows -- so this could still be a strong bounce inside the larger
+# downtrend rather than a full reversal. Re-enabled anyway since H1 is
+# the timeframe that actually drives the gate; watch closely rather
+# than assume the fix is fully proven.
+SCAN_TIMEFRAMES = {
+    "M5": Interval.in_5_minute,
+}
 
 # Rule-based indicator strategies, run in parallel with SMC above.
 # EMA Pullback and BB Reversion were tried and dropped -- backtested as
@@ -399,11 +410,12 @@ def run(poll_interval=None, router=None, executor=None, timeframes=None):
     Continuously polls the market on a timer and runs up to 3
     independent signal sources every cycle, all XAUUSD/M5 only:
 
-    - SMC (structure/liquidity/FVG/OB) across SCAN_TIMEFRAMES -- PAUSED
-      as of 2026-07-17 (SCAN_TIMEFRAMES is an empty dict; see that
-      constant's comment for why). Loop below simply has nothing to
-      iterate when paused, so no code path changes, just zero SMC
-      scans per cycle. Gated on a real 2-of-3 sniper confluence
+    - SMC (structure/liquidity/FVG/OB) across SCAN_TIMEFRAMES (M5) --
+      was paused 2026-07-17 to 2026-07-22 after a live losing streak;
+      see that constant's comment for the full story and re-enable
+      rationale. SCAN_TIMEFRAMES is a live on/off switch (empty dict =
+      paused, loop below simply has nothing to iterate) if it needs to
+      be paused again. Gated on a real 2-of-3 sniper confluence
       requirement and a fast H1-only HTF alignment check when active.
     - Session Breakout -- direct market entry at breakout confirmation
       (its original "wait for a retest" design was backtested and
