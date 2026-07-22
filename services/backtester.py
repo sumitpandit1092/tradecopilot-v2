@@ -9,7 +9,7 @@ CONFIDENCE_THRESHOLD = 85
 def run_backtest(candles, htf_data, account_balance, risk_percent,
                   entry_label="M15", lookback=100, log_file="backtest_journal.json",
                   progress_every=500, max_wait_bars=20,
-                  max_positions=2, single_side=True, instrument="XAUUSD"):
+                  max_positions=1, single_side=True, instrument="XAUUSD"):
     """
     Walk-forward backtest over historical `candles` (oldest-first).
 
@@ -80,11 +80,11 @@ def run_backtest(candles, htf_data, account_balance, risk_percent,
         )
 
         if trade_ready:
-            # SMC opts into position limits: by default at most 2 live
-            # trades per entry timeframe, one direction only (no
-            # hedging). Keeps the engine from stacking same-side entries
-            # all through a trend and lets a resting limit sit alongside
-            # one fill. Pass max_positions=None to disable (broadcast
+            # SMC opts into position limits: by default at most 1 live
+            # trade per entry timeframe (matches the live scanner's cap,
+            # tightened from 2 for the same overtrading-prevention
+            # reasoning as Session Breakout's cap), one direction only
+            # (no hedging). Pass max_positions=None to disable (broadcast
             # every signal) -- used by the cap-isolation experiment.
             trade = executor.open_trade(
                 signal=signal, entry=entry, risk=risk, bar_index=i,

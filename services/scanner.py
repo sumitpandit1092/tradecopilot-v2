@@ -159,18 +159,21 @@ def _scan_smc_timeframe(label, candles, executor, router, macro, last_seen):
     )
 
     if trade_ready:
-        # Position cap: at most 2 live SMC trades per timeframe, one
+        # Position cap: at most 1 live SMC trade per timeframe, one
         # direction only (no hedging) -- see ExecutionEngine.open_trade.
+        # Tightened from 2 to 1, same reasoning as Session Breakout's
+        # cap: one live trade at a time is the more conservative
+        # guarantee against overtrading than "up to N same-direction".
         trade_record = executor.open_trade(
             signal=signal, entry=entry, risk=risk,
-            timeframe=label, max_positions=2, single_side=True,
+            timeframe=label, max_positions=1, single_side=True,
         )
 
         if trade_record:
             _log(f"[SMC/{label}] Trade #{trade_record['id']} {trade_record['status']} ({trade_record['entry_type']})")
             router.fire_signal(signal, entry, risk, timeframe=f"SMC/{label}")
         else:
-            _log(f"[SMC/{label}] Position cap reached (2/side) or opposite side live -- skipping to avoid overtrading.")
+            _log(f"[SMC/{label}] Position cap reached (1/side) or opposite side live -- skipping to avoid overtrading.")
 
 
 def _scan_extra_strategies(executor, router, last_seen_extra):
